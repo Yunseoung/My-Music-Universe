@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>My Music Universe</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #050505; color: white; font-family: 'Segoe UI', sans-serif; }
+        
+        /* 우주 배경 효과 */
+        #universe { width: 100vw; height: 100vh; }
+        
+        /* 툴팁 스타일 */
+        .tooltip {
+            position: absolute;
+            text-align: center;
+            padding: 8px 12px;
+            font-size: 14px;
+            background: rgba(0, 0, 0, 0.8);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            border-radius: 4px;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.2s;
+            box-shadow: 0 0 10px rgba(255, 255, 255, 0.2);
+            z-index: 10;
+        }
+
+        /* UI 오버레이 */
+        .ui-layer {
+            position: absolute;
+            top: 20px; left: 20px;
+            pointer-events: none;
+        }
+        h1 { margin: 0; font-weight: 300; letter-spacing: 2px; text-shadow: 0 0 10px rgba(255,255,255,0.5); }
+        p { color: #888; font-size: 0.9em; }
+    </style>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="universe_data.js"></script>
+</head>
+<body>
+
+<div class="ui-layer">
+    <h1>GALAXY OF TASTES</h1>
+    <p>Scroll to Zoom • Drag to Move • Hover for Info</p>
+</div>
+<div id="tooltip" class="tooltip"></div>
+<svg id="universe"></svg>
+
+<script>
+    // 1. 데이터 확인
+    if (!window.universeData) {
+        alert("데이터 파일(universe_data.js)이 없습니다. 파이썬 코드를 먼저 실행해주세요!");
+    }
+    
+    const data = window.universeData;
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+
+    // 2. 색상 스케일 (온도/열정 표현)
+    // 많이 들은 아티스트일수록 붉은색(Hot), 적을수록 푸른색(Cool)
+    const colorScale = d3.scaleSequential(d3.interpolatePlasma)
+        .domain([0, 100]); // 아티스트 카운트 범위 대략 설정
+
+    // 3. SVG 및 줌 설정
+    const svg = d3.select("#universe")
+        .attr("viewBox", [-width / 2, -height / 2, width, height]);
+
+    const g = svg.append("g");
+
+    const zoom = d3.zoom()
+        .scaleExtent([0.1, 8])
+        .on("zoom", (event) => g.attr("transform", event.transform));
+
+    svg.call(zoom);
+
+    // 4. 시뮬레이션 물리 엔진 설정
+    const simulation = d3.forceSimulation(data.nodes)
+        .force("charge", d3.forceManyBody().strength(d => {
+            // 중심은 강하게 당기고, 나머지는 서로 밀어냄
+            return d.id === "ME" ? -1000 : -30;
+        })) 
+        .force("link", d3.forceLink(data.links).id(d => d.id).distance(d => {
+            // 아티스트는 멀리, 노래는 아티스트 가까이
+            return d.target.group === 1 ? 150 : 30;
+        }))
+        .force("center", d3.forceCenter(0, 0))
+        .force("collide", d3.forceCollide(d => d.group === 1 ? d.size * 1.5 : 5).iterations(2));
+
+    // 5. 그리기 (Links)
+    const link = g.append("g")
+        .attr("stroke-opacity", 0.3)
+        .selectAll("line")
+        .data(data.links)
+        .join("line")
+        .attr("stroke", d => d.target.group === 2 ? "#555" : "#aaa") // 노래 연결선은 어둡게
+        .attr("stroke-width", d => d.target.group === 2 ? 0.5 : 1);
+
+    // 6. 그리기 (Nodes)
+    const node = g.append("g")
+        .selectAll("circle")
+        .data(data.nodes)
+        .join("circle")
+        .attr("r", d => {
+            if (d.group === 0) return 20; // ME
+            if (d.group === 1) return Math.sqrt(d.count) * 2 + 3; // 아티스트 (크기 조정)
+            return 2; // 노래
+        })
+        .attr("fill", d => {
+            if (d.group === 0) return "#fff"; // ME (White Core)
+            if (d.group === 1) return colorScale(d.count); // Artist (Color by count)
+            return "#aaa"; // Song (Star dust)
+        })
+        .attr("stroke", d => d.group === 0 ? "rgba(255,255,255,0.5)" : "none")
+        .attr("stroke-width", 10)
+        .style("cursor", "pointer")
+        .call(d3.drag()
+            .on("start", dragstarted)
+            .on("drag", dragged)
+            .on("end", dragended));
+
+    // 글로우 효과 (Shadow)
+    node.filter(d => d.group === 1)
+        .style("filter", "drop-shadow(0px 0px 6px rgba(255,255,255,0.5))");
+
+    // 7. 인터랙션 (Hover & Tooltip)
+    const tooltip = d3.select("#tooltip");
+
+    node.on("mouseover", (event, d) => {
+        // 하이라이트 효과
+        link.style("stroke-opacity", l => (l.source === d || l.target === d) ? 1 : 0.1);
+        node.style("opacity", n => (n === d || isConnected(d, n)) ? 1 : 0.1);
+
+        // 툴팁 표시
+        tooltip.style("opacity", 1)
+               .html(getTooltipContent(d));
+    })
+    .on("mousemove", (event) => {
+        tooltip.style("left", (event.pageX + 15) + "px")
+               .style("top", (event.pageY - 15) + "px");
+    })
+    .on("mouseout", () => {
+        // 복구
+        link.style("stroke-opacity", 0.3);
+        node.style("opacity", 1);
+        tooltip.style("opacity", 0);
+    });
+
+    // 헬퍼 함수: 연결 여부 확인
+    function isConnected(a, b) {
+        return data.links.some(l => 
+            (l.source === a && l.target === b) || (l.source === b && l.target === a)
+        );
+    }
+
+    // 헬퍼 함수: 툴팁 내용
+    function getTooltipContent(d) {
+        if (d.group === 0) return `<strong>ME</strong><br>Total Records: ${d.count}`;
+        if (d.group === 1) return `<strong>${d.id}</strong><br>Plays: ${d.count}`;
+        return `<strong>${d.name}</strong><br>${d.artist}`;
+    }
+
+    // 8. 시뮬레이션 틱(Tick) 업데이트
+    simulation.on("tick", () => {
+        link
+            .attr("x1", d => d.source.x)
+            .attr("y1", d => d.source.y)
+            .attr("x2", d => d.target.x)
+            .attr("y2", d => d.target.y);
+
+        node
+            .attr("cx", d => d.x)
+            .attr("cy", d => d.y);
+    });
+
+    // 드래그 함수
+    function dragstarted(event, d) {
+        if (!event.active) simulation.alphaTarget(0.3).restart();
+        d.fx = d.x;
+        d.fy = d.y;
+    }
+
+    function dragged(event, d) {
+        d.fx = event.x;
+        d.fy = event.y;
+    }
+
+    function dragended(event, d) {
+        if (!event.active) simulation.alphaTarget(0);
+        d.fx = null;
+        d.fy = null;
+    }
+</script>
+
+</body>
+</html>
